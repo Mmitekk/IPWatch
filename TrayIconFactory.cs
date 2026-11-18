@@ -25,8 +25,8 @@ internal static class TrayIconFactory
             {
                 g.SetClip(clip, CombineMode.Replace);
 
-                // заполняем квадрат флагом с обрезкой по центру
-                float scale = Math.Max(size / (float)flag.Width, size / (float)flag.Height);
+                // вписываем флаг целиком (contain), чтобы были видны вертикальные полосы
+                float scale = Math.Min(size / (float)flag.Width, size / (float)flag.Height);
                 float w = flag.Width * scale;
                 float h = flag.Height * scale;
                 g.DrawImage(flag, (size - w) / 2f, (size - h) / 2f, w, h);
