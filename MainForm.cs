@@ -57,6 +57,7 @@ internal sealed class MainForm : Form
     private bool _exiting;
     private CancellationTokenSource? _cts;
     private string _lastCountryCode = "";
+    private Image? _trayFlagImage;
     private string _trayIconKey = "";
     private int _lastTrayMinute = -1;
     private DateTime _shownAt = DateTime.MinValue;
@@ -658,6 +659,8 @@ internal sealed class MainForm : Form
             _lastCountryCode = info.CountryCode;
             _flag.Image?.Dispose();
             _flag.Image = null;
+            _trayFlagImage = null;
+            UpdateTrayPresentation();
 
             var code = info.CountryCode;
             _ = Task.Run(async () =>
@@ -669,13 +672,16 @@ internal sealed class MainForm : Form
                     BeginInvoke(() =>
                     {
                         if (IsDisposed || !string.Equals(code, _lastCountryCode, StringComparison.OrdinalIgnoreCase)) return;
+
                         _flag.Image?.Dispose();
-                        _flag.Image = image;
+                        _flag.Image = (Image)image.Clone(); // кеш не отдаём во владение PictureBox
+                        _trayFlagImage = image;
+                        UpdateTrayPresentation();
                     });
                 }
                 catch (Exception)
                 {
-                    image.Dispose();
+                    // форма уже закрывается
                 }
             });
         }
@@ -755,10 +761,13 @@ internal sealed class MainForm : Form
             _ => Color.FromArgb(150, 56, 56)
         };
 
-        var key = $"{code}:{bucket}";
+        var key = $"{code}:{bucket}:{(_trayFlagImage != null ? "flag" : "code")}";
         if (key != _trayIconKey || _trayDynamic == null)
         {
-            var icon = TrayIconFactory.Create(code, backColor, Color.White);
+            var icon = _trayFlagImage != null
+                ? TrayIconFactory.CreateFlag(_trayFlagImage, backColor)
+                : TrayIconFactory.Create(code, backColor, Color.White);
+
             var previous = _trayDynamic;
             _trayDynamic = icon;
             _tray.Icon = icon;
