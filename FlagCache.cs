@@ -33,7 +33,7 @@ internal static class FlagCache
 
         lock (Cache)
         {
-            Cache[code] = image;
+            if (image != null) Cache[code] = image;
         }
 
         return image;

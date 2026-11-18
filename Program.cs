@@ -14,7 +14,12 @@ internal static class Program
         if (!created)
         {
             // Уже запущено — просим существующее окно показаться.
-            NativeMethods.PostMessage(NativeMethods.HwndBroadcast, ShowWindowMessage, IntPtr.Zero, IntPtr.Zero);
+            var hwnd = NativeMethods.FindWindow(null, "IP Watch");
+            if (hwnd != IntPtr.Zero)
+                NativeMethods.PostMessage(hwnd, ShowWindowMessage, IntPtr.Zero, IntPtr.Zero);
+            else
+                NativeMethods.PostMessage(NativeMethods.HwndBroadcast, ShowWindowMessage, IntPtr.Zero, IntPtr.Zero);
+
             return;
         }
 
@@ -38,4 +43,7 @@ internal static class NativeMethods
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr FindWindow(string? className, string windowName);
 }

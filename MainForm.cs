@@ -1,7 +1,6 @@
-using System.ComponentModel;
-using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Globalization;
+using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
 
@@ -23,6 +22,9 @@ internal sealed class MainForm : Form
     private static readonly Color Warn = Color.FromArgb(232, 190, 88);
     private static readonly Color Bad = Color.FromArgb(231, 110, 110);
 
+    private readonly bool _startHidden;
+    private bool _allowShow;
+    private bool _initialized;
     private readonly NotifyIcon _tray;
     private readonly Icon _appIcon;
     private Icon? _trayDynamic;
@@ -45,6 +47,7 @@ internal sealed class MainForm : Form
     private readonly DarkCheckBox _autostartCheck;
     private readonly System.Windows.Forms.Timer _clockTimer;
     private readonly System.Windows.Forms.Timer _refreshTimer;
+    private readonly System.Windows.Forms.Timer _netDebounce;
 
     private IpInfo? _ip;
     private NetworkSnapshot _net = NetworkSnapshot.Empty;
@@ -56,19 +59,25 @@ internal sealed class MainForm : Form
     private string _lastCountryCode = "";
     private string _trayIconKey = "";
     private int _lastTrayMinute = -1;
+    private DateTime _shownAt = DateTime.MinValue;
+    private DateTime _hiddenAt = DateTime.MinValue;
     private readonly Icon _emptyIcon;
     private readonly ToolTip _tips = new() { InitialDelay = 600, ReshowDelay = 200, AutoPopDelay = 15000 };
+    private readonly Font _ispFont = new("Segoe UI", 9.5F, FontStyle.Regular, GraphicsUnit.Point);
+    private readonly Font _gatewayFont = new("Segoe UI", 9.5F, FontStyle.Regular, GraphicsUnit.Point);
 
     private static readonly int WM_SHOW_IPWATCH = NativeMethods.RegisterWindowMessage("IPWatch.ShowWindow");
 
     public MainForm(bool startHidden)
     {
+        _startHidden = startHidden;
         Text = "IP Watch";
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
         ShowInTaskbar = false;
         TopMost = true;
         AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96F, 96F);
         ClientSize = new Size(384, 462);
         BackColor = Bg;
         DoubleBuffered = true;
@@ -284,13 +293,58 @@ internal sealed class MainForm : Form
         _refreshTimer.Tick += async (_, _) => await RefreshAsync(manual: false);
         _refreshTimer.Start();
 
-        Load += async (_, _) =>
+        _netDebounce = new System.Windows.Forms.Timer { Interval = 1500 };
+        _netDebounce.Tick += NetDebounceTick;
+
+        // Смена сети/VPN — обновляемся почти сразу.
+        NetworkChange.NetworkAddressChanged += OnNetworkChanged;
+        NetworkChange.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged;
+
+        Load += (_, _) => InitializeOnce();
+    }
+
+    /// <summary>Первый запуск: раскладка, первый опрос сети. Не зависит от того, показываем окно или нет.</summary>
+    private void InitializeOnce()
+    {
+        if (_initialized) return;
+        _initialized = true;
+
+        PlaceNearTray();
+        UpdateClock();
+        ShowFirstRunHint();
+
+        if (!_startHidden) ShowWindow();
+        _ = RefreshAsync(manual: false);
+    }
+
+    /// <summary>Первый запуск: короткая подсказка, что программа уже в трее.</summary>
+    private void ShowFirstRunHint()
+    {
+        try
         {
-            PlaceNearTray();
-            UpdateClock();
-            await RefreshAsync(manual: false);
-            if (!startHidden) ShowWindow();
-        };
+            using var key = Registry.CurrentUser.CreateSubKey(@"Software\IPWatch");
+            if (key?.GetValue("HintShown") is not null) return;
+
+            key?.SetValue("HintShown", 1, RegistryValueKind.DWord);
+            _tray.ShowBalloonTip(4000, "IP Watch запущен",
+                "Иконка с кодом страны — в трее. Клик открывает карточку.", ToolTipIcon.Info);
+        }
+        catch (Exception)
+        {
+            // подсказка не критична
+        }
+    }
+
+    /// <summary>Пока окно не показывали явно, оно существует, но невидимо (тихий старт в трее).</summary>
+    protected override void SetVisibleCore(bool value)
+    {
+        if (!_allowShow && _startHidden)
+        {
+            if (!IsHandleCreated) CreateHandle();
+            value = false;
+        }
+
+        base.SetVisibleCore(value);
     }
 
     protected override CreateParams CreateParams
@@ -299,8 +353,26 @@ internal sealed class MainForm : Form
         {
             var cp = base.CreateParams;
             cp.ClassStyle |= 0x00020000; // CS_DROPSHADOW
+            cp.ExStyle |= 0x00000080;    // WS_EX_TOOLWINDOW — не показываться в Alt+Tab
             return cp;
         }
+    }
+
+    /// <summary>Сеть изменилась (подключили VPN, сменили Wi-Fi) — перепроверяем через паузу.</summary>
+    private void OnNetworkChanged(object? sender, EventArgs e)
+    {
+        if (_exiting) return;
+        _netDebounce.Stop();
+        _netDebounce.Start();
+    }
+
+    private void OnNetworkAvailabilityChanged(object? sender, NetworkAvailabilityEventArgs e) =>
+        OnNetworkChanged(sender, e);
+
+    private async void NetDebounceTick(object? sender, EventArgs e)
+    {
+        _netDebounce.Stop();
+        await RefreshAsync(manual: false);
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -316,6 +388,9 @@ internal sealed class MainForm : Form
         {
             // тёмная рамка не критична
         }
+
+        // В тихом режиме Load может не прийти — инициализируемся, как только есть handle.
+        BeginInvoke(InitializeOnce);
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -430,12 +505,31 @@ internal sealed class MainForm : Form
 
     private void ToggleWindow()
     {
-        if (Visible && WindowState != FormWindowState.Minimized) HideToTray();
-        else ShowWindow();
+        if (Visible && WindowState != FormWindowState.Minimized)
+        {
+            HideToTray();
+            return;
+        }
+
+        // Только что спряталось из-за клика по трею — не открываем обратно этим же кликом.
+        if ((DateTime.UtcNow - _hiddenAt).TotalMilliseconds < 350) return;
+
+        ShowWindow();
+    }
+
+    protected override void OnDeactivate(EventArgs e)
+    {
+        base.OnDeactivate(e);
+
+        // Карточка ведёт себя как всплывающее окно: кликнули мимо — спряталась.
+        if (!_exiting && Visible && (DateTime.UtcNow - _shownAt).TotalMilliseconds > 600)
+            HideToTray();
     }
 
     private void ShowWindow()
     {
+        _allowShow = true;
+
         if (!Visible)
         {
             PlaceNearTray();
@@ -446,11 +540,17 @@ internal sealed class MainForm : Form
             WindowState = FormWindowState.Normal;
         }
 
+        _shownAt = DateTime.UtcNow;
         Activate();
         BringToFront();
+        SetForegroundWindow(Handle);
     }
 
-    private void HideToTray() => Hide();
+    private void HideToTray()
+    {
+        Hide();
+        _hiddenAt = DateTime.UtcNow;
+    }
 
     private void UpdateTrayText()
     {
@@ -549,10 +649,11 @@ internal sealed class MainForm : Form
             ? info.Place
             : $"{info.CountryCode} · {info.Place}";
         _ispLabel.Tag = info.Isp;
-        SetFitText(_ispLabel, string.IsNullOrWhiteSpace(info.Isp) ? "—" : info.Isp);
+        SetFitText(_ispLabel, _ispFont, string.IsNullOrWhiteSpace(info.Isp) ? "—" : info.Isp);
         UpdateClock();
 
-        if (!string.Equals(_lastCountryCode, info.CountryCode, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(_lastCountryCode, info.CountryCode, StringComparison.OrdinalIgnoreCase) ||
+            _flag.Image == null)
         {
             _lastCountryCode = info.CountryCode;
             _flag.Image?.Dispose();
@@ -595,9 +696,9 @@ internal sealed class MainForm : Form
 
     private void ApplyNetwork()
     {
-        _gatewayLabel.Text = _net.Gateway == null
+        SetFitText(_gatewayLabel, _gatewayFont, _net.Gateway == null
             ? "не определён"
-            : _gatewayPing != null ? $"{_net.Gateway} · {_gatewayPing} мс" : _net.Gateway;
+            : _gatewayPing != null ? $"{_net.Gateway} · {_gatewayPing} мс" : _net.Gateway);
 
         _localIpLabel.Text = string.IsNullOrWhiteSpace(_net.LocalIp) ? "—" : _net.LocalIp;
         _localIpLabel.Tag = string.IsNullOrWhiteSpace(_net.AdapterName) || _net.AdapterName == "—"
@@ -607,32 +708,32 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>Вписывает текст в метку, уменьшая шрифт, чтобы ничего не обрезалось.</summary>
-    private static void SetFitText(Label label, string text)
+    private static void SetFitText(Label label, Font baseFont, string text)
     {
-        if (label.Font is null) return;
-
-        var baseFont = label.Tag as Font ?? (Font)label.Font.Clone();
-        label.Tag = baseFont;
-
         var available = label.ClientSize.Width;
         var size = baseFont.Size;
+        Font? replacement = null;
 
         while (size > 6.5f)
         {
-            using var probe = new Font(baseFont.FontFamily, size, baseFont.Style, GraphicsUnit.Point);
-            var measured = TextRenderer.MeasureText(text, probe).Width;
-            if (measured <= available)
+            var probe = new Font(baseFont.FontFamily, size, baseFont.Style, GraphicsUnit.Point);
+            if (TextRenderer.MeasureText(text, probe).Width <= available)
             {
-                label.Font = probe;
-                label.Text = text;
-                return;
+                replacement = probe;
+                break;
             }
 
+            probe.Dispose();
             size -= 0.5f;
         }
 
-        label.Font = new Font(baseFont.FontFamily, 6.5f, baseFont.Style, GraphicsUnit.Point);
+        replacement ??= new Font(baseFont.FontFamily, 6.5f, baseFont.Style, GraphicsUnit.Point);
+
+        var previous = label.Font;
+        label.Font = replacement;
         label.Text = text;
+
+        if (previous is not null && !ReferenceEquals(previous, baseFont)) previous.Dispose();
     }
 
     private void UpdateTrayPresentation()
@@ -691,8 +792,11 @@ internal sealed class MainForm : Form
     private void ExitApp()
     {
         _exiting = true;
+        NetworkChange.NetworkAddressChanged -= OnNetworkChanged;
+        NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
         _clockTimer.Stop();
         _refreshTimer.Stop();
+        _netDebounce.Stop();
         _cts?.Cancel();
         _tray.Visible = false;
         _tray.Dispose();
@@ -748,6 +852,9 @@ internal sealed class MainForm : Form
     private static extern bool ReleaseCapture();
 
     [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
     [DllImport("dwmapi.dll", PreserveSig = true)]
@@ -766,21 +873,24 @@ internal static class NotifyIconExtensions
 internal static class Autostart
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private const string ConfigKey = @"Software\IPWatch";
     private const string ValueName = "IPWatch";
 
+    /// <summary>Первый запуск: включаем автозапуск один раз и запоминаем это.</summary>
     public static void EnsureFirstRun()
     {
         try
         {
-            using var key = Registry.CurrentUser.OpenSubKey(RunKey, true);
-            if (key?.GetValue(ValueName) != null) return;
+            using var config = Registry.CurrentUser.CreateSubKey(ConfigKey);
+            if (config?.GetValue("AutostartConfigured") is not null) return;
+
+            if (!IsEnabled()) Set(true);
+            config?.SetValue("AutostartConfigured", 1, RegistryValueKind.DWord);
         }
         catch (Exception)
         {
-            return;
+            // не критично
         }
-
-        Set(true);
     }
 
     public static bool IsEnabled()
@@ -812,6 +922,9 @@ internal static class Autostart
             {
                 key.DeleteValue(ValueName, false);
             }
+
+            using var config = Registry.CurrentUser.CreateSubKey(ConfigKey);
+            config?.SetValue("AutostartConfigured", 1, RegistryValueKind.DWord);
         }
         catch (Exception)
         {
