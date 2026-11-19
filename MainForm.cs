@@ -47,6 +47,7 @@ internal sealed class MainForm : Form
     private readonly DarkCheckBox _autostartCheck;
     private readonly System.Windows.Forms.Timer _clockTimer;
     private readonly System.Windows.Forms.Timer _refreshTimer;
+    private readonly System.Windows.Forms.Timer _fastTimer;
     private readonly System.Windows.Forms.Timer _netDebounce;
 
     private IpInfo? _ip;
@@ -54,6 +55,10 @@ internal sealed class MainForm : Form
     private int? _ping;
     private int? _gatewayPing;
     private bool _busy;
+    private bool _fastBusy;
+    private DateTime _lastFastCheck = DateTime.MinValue;
+    private string _lastUpdateStamp = "ожидание данных";
+    private string? _lastError;
     private bool _exiting;
     private CancellationTokenSource? _cts;
     private string _lastCountryCode = "";
@@ -290,9 +295,15 @@ internal sealed class MainForm : Form
         _clockTimer.Tick += (_, _) => UpdateClock();
         _clockTimer.Start();
 
-        _refreshTimer = new System.Windows.Forms.Timer { Interval = 60_000 };
+        _refreshTimer = new System.Windows.Forms.Timer { Interval = 15 * 60_000 };
         _refreshTimer.Tick += async (_, _) => await RefreshAsync(manual: false);
         _refreshTimer.Start();
+
+        // Раз в минуту — дешёвая проверка IP и пинг; полные геоданные обновляются реже
+        // или сразу, если IP сменился.
+        _fastTimer = new System.Windows.Forms.Timer { Interval = 60_000 };
+        _fastTimer.Tick += async (_, _) => await FastTickAsync();
+        _fastTimer.Start();
 
         _netDebounce = new System.Windows.Forms.Timer { Interval = 1500 };
         _netDebounce.Tick += NetDebounceTick;
@@ -545,6 +556,10 @@ internal sealed class MainForm : Form
         Activate();
         BringToFront();
         SetForegroundWindow(Handle);
+
+        // Открыли карточку — если данные староваты, сразу проверяем IP.
+        if ((DateTime.UtcNow - _lastFastCheck).TotalSeconds > 20)
+            _ = FastTickAsync();
     }
 
     private void HideToTray()
@@ -584,10 +599,67 @@ internal sealed class MainForm : Form
         var offset = _ip.OffsetNow();
         _tzLabel.Text = $"{IpTimeZone.FormatOffset(offset)} · {IpTimeZone.DescribeDifference(offset)}";
 
+        var next = 60 - (int)(DateTime.UtcNow - _lastFastCheck).TotalSeconds;
+        if (next < 0) next = 0;
+        _updatedLabel.Text = _lastError ?? $"{_lastUpdateStamp} · проверка IP через {next} с";
+
         if (now.Minute != _lastTrayMinute)
         {
             _lastTrayMinute = now.Minute;
             UpdateTrayText();
+        }
+    }
+
+    /// <summary>Дешёвая проверка: изменился ли внешний IP, плюс свежий пинг.</summary>
+    private async Task FastTickAsync()
+    {
+        if (_fastBusy || _busy) return;
+        _fastBusy = true;
+
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            var ip = await IpCheckService.GetIpAsync(cts.Token).ConfigureAwait(true);
+
+            if (ip == null)
+            {
+                _lastError = "нет ответа от сервиса проверки IP";
+                return;
+            }
+
+            if (_ip != null && !string.Equals(ip, _ip.Ip, StringComparison.Ordinal))
+            {
+                _lastError = null;
+                _fastBusy = false;
+                await RefreshAsync(manual: false);
+                return;
+            }
+
+            _ping = await PingService.InternetAsync(cts.Token).ConfigureAwait(true);
+            _gatewayPing = _net.Gateway != null
+                ? await PingService.IcmpAsync(_net.Gateway, cts.Token).ConfigureAwait(true)
+                : null;
+
+            _lastFastCheck = DateTime.UtcNow;
+            _lastUpdateStamp = $"проверено {DateTime.Now:HH:mm:ss}";
+            _lastError = null;
+
+            ApplyPing(_ping);
+            ApplyNetwork();
+            UpdateTrayPresentation();
+        }
+        catch (OperationCanceledException)
+        {
+            // таймаут проверки — попробуем в следующий раз
+        }
+        catch (Exception ex)
+        {
+            _lastError = ex.Message.Length > 90 ? ex.Message[..90] + "…" : ex.Message;
+        }
+        finally
+        {
+            _fastBusy = false;
+            UpdateClock();
         }
     }
 
@@ -621,7 +693,9 @@ internal sealed class MainForm : Form
             ApplyNetwork();
 
             var stamp = DateTime.Now.ToString("HH:mm:ss");
-            _updatedLabel.Text = $"обновлено {stamp} · автообновление раз в 60 с";
+            _lastFastCheck = DateTime.UtcNow;
+            _lastUpdateStamp = $"обновлено {stamp}";
+            _lastError = null;
             _statusLabel.Text = "актуально";
             UpdateTrayPresentation();
         }
@@ -632,7 +706,7 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             _statusLabel.Text = "ошибка сети";
-            _updatedLabel.Text = ex.Message.Length > 90 ? ex.Message[..90] + "…" : ex.Message;
+            _lastError = ex.Message.Length > 90 ? ex.Message[..90] + "…" : ex.Message;
         }
         finally
         {
@@ -805,6 +879,7 @@ internal sealed class MainForm : Form
         NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
         _clockTimer.Stop();
         _refreshTimer.Stop();
+        _fastTimer.Stop();
         _netDebounce.Stop();
         _cts?.Cancel();
         _tray.Visible = false;

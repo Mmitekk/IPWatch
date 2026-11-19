@@ -21,7 +21,7 @@
 - **Шлюз** по умолчанию и пинг до него, **локальный IP**, **провайдер**.
 - Трей-иконка: **флаг страны** + точка качества связи (зелёная / жёлтая / красная).
 - Подсказка при наведении: `IP · страна · время · пинг`.
-- Обновление раз в 60 секунд и сразу после смены сети/VPN.
+- Обновление раз в минуту (IP и пинг) и сразу после смены сети/VPN; полные геоданные — при смене IP или раз в 15 минут.
 - Автозапуск при входе в Windows, без прав администратора.
 - Один самодостаточный `.exe`, без консоли и без установленного .NET.
 
@@ -114,7 +114,7 @@ The tray icon is the **flag of the exit country**.
 - **Default gateway** and its ping, **local IP**, **ISP**.
 - Tray icon: **country flag** + link-quality dot (green / yellow / red).
 - Hover tooltip: `IP · country · time · ping`.
-- Refreshes every 60 seconds and immediately after network/VPN changes.
+- Refreshes every minute (IP and ping) and immediately after network/VPN changes; full geo data is refreshed when the IP changes or every 15 minutes.
 - Starts with Windows, no administrator rights required.
 - A single self-contained `.exe`, no console window, no .NET installation needed.
 
