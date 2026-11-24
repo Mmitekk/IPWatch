@@ -74,9 +74,21 @@ internal sealed class MainForm : Form
 
     private static readonly int WM_SHOW_IPWATCH = NativeMethods.RegisterWindowMessage("IPWatch.ShowWindow");
 
-    public MainForm(bool startHidden)
+    public MainForm(bool startHidden, EventWaitHandle? showSignal = null)
     {
         _startHidden = startHidden;
+
+        if (showSignal != null)
+        {
+            ThreadPool.RegisterWaitForSingleObject(showSignal, (_, _) =>
+            {
+                if (!IsDisposed)
+                {
+                    try { BeginInvoke(ShowWindow); }
+                    catch (Exception) { }
+                }
+            }, null, -1, false);
+        }
         Text = "IP Watch";
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
@@ -618,7 +630,7 @@ internal sealed class MainForm : Form
 
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(25));
             var ip = await IpCheckService.GetIpAsync(cts.Token).ConfigureAwait(true);
 
             if (ip == null)
@@ -671,7 +683,7 @@ internal sealed class MainForm : Form
         if (manual || _ip == null) _statusLabel.Text = "обновление…";
         _refreshButton.Enabled = false;
         _cts?.Cancel();
-        _cts = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+        _cts = new CancellationTokenSource(TimeSpan.FromSeconds(40));
         var ct = _cts.Token;
 
         try

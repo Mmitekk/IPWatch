@@ -12,10 +12,10 @@ internal static class IpCheckService
         var client = new HttpClient(new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-            ConnectTimeout = TimeSpan.FromSeconds(5)
+            ConnectTimeout = TimeSpan.FromSeconds(15)
         })
         {
-            Timeout = TimeSpan.FromSeconds(8)
+            Timeout = TimeSpan.FromSeconds(20)
         };
         client.DefaultRequestHeaders.UserAgent.ParseAdd("IPWatch/1.0 (+desktop tray app)");
         return client;
@@ -23,7 +23,7 @@ internal static class IpCheckService
 
     public static async Task<string?> GetIpAsync(CancellationToken ct)
     {
-        foreach (var url in new[] { "https://api.ipify.org", "https://checkip.amazonaws.com" })
+        foreach (var url in new[] { "https://api.ipify.org", "https://icanhazip.com", "https://checkip.amazonaws.com" })
         {
             try
             {

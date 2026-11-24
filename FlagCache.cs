@@ -5,7 +5,7 @@ namespace IpWatch;
 
 internal static class FlagCache
 {
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(8) };
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
     private static readonly Dictionary<string, Image?> Cache = new(StringComparer.OrdinalIgnoreCase);
 
     public static async Task<Image?> GetAsync(string countryCode, CancellationToken ct)

@@ -13,10 +13,10 @@ internal static class IpLookupService
         var client = new HttpClient(new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-            ConnectTimeout = TimeSpan.FromSeconds(6)
+            ConnectTimeout = TimeSpan.FromSeconds(15)
         })
         {
-            Timeout = TimeSpan.FromSeconds(10)
+            Timeout = TimeSpan.FromSeconds(20)
         };
         client.DefaultRequestHeaders.UserAgent.ParseAdd("IPWatch/1.0 (+desktop tray app)");
         client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
@@ -27,7 +27,36 @@ internal static class IpLookupService
     {
         var errors = new List<string>();
 
-        foreach (var provider in new Func<CancellationToken, Task<IpInfo?>>[] { FromIpWhoIs, FromIpApi, FromIpApiCo })
+        // Фаза 1: основные надёжные HTTPS-провайдеры опрашиваются параллельно (кто быстрее ответит)
+        var primaryTasks = new List<Task<IpInfo?>>
+        {
+            FromIpWhoIs(ct),
+            FromIpInfo(ct)
+        };
+
+        while (primaryTasks.Count > 0)
+        {
+            var completed = await Task.WhenAny(primaryTasks).ConfigureAwait(false);
+            primaryTasks.Remove(completed);
+
+            try
+            {
+                var info = await completed.ConfigureAwait(false);
+                if (info != null && !string.IsNullOrWhiteSpace(info.Ip))
+                    return info;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                errors.Add(ex.Message);
+            }
+        }
+
+        // Фаза 2: резервные сервисы
+        foreach (var provider in new Func<CancellationToken, Task<IpInfo?>>[] { FromFreeIpApi, FromIpApi, FromIpApiCo })
         {
             try
             {
@@ -74,6 +103,68 @@ internal static class IpLookupService
             Region: Str(root, "region"),
             City: Str(root, "city"),
             Isp: Conn(root, "isp") is { Length: > 0 } isp ? isp : Conn(root, "org"),
+            TimeZoneId: tzId,
+            UtcOffsetSeconds: offset);
+    }
+
+    // https://ipinfo.io/json — надёжный HTTPS без ключа (до 50 000 запросов/мес).
+    private static async Task<IpInfo?> FromIpInfo(CancellationToken ct)
+    {
+        using var doc = await GetJsonAsync("https://ipinfo.io/json", ct).ConfigureAwait(false);
+        var root = doc.RootElement;
+
+        var ip = Str(root, "ip");
+        if (string.IsNullOrWhiteSpace(ip)) return null;
+
+        var code = Str(root, "country");
+        var tzId = Str(root, "timezone");
+        var offset = 0;
+        if (!string.IsNullOrWhiteSpace(tzId))
+        {
+            var zone = IpTimeZone.Find(tzId);
+            if (zone != null)
+                offset = (int)zone.GetUtcOffset(DateTime.UtcNow).TotalSeconds;
+        }
+
+        return new IpInfo(
+            Ip: ip,
+            CountryName: Str(root, "country"),
+            CountryCode: code,
+            Region: Str(root, "region"),
+            City: Str(root, "city"),
+            Isp: Str(root, "org"),
+            TimeZoneId: tzId,
+            UtcOffsetSeconds: offset);
+    }
+
+    // https://freeipapi.com/api/json — ещё один надёжный HTTPS-резерв без ключа.
+    private static async Task<IpInfo?> FromFreeIpApi(CancellationToken ct)
+    {
+        using var doc = await GetJsonAsync("https://freeipapi.com/api/json", ct).ConfigureAwait(false);
+        var root = doc.RootElement;
+
+        var ip = Str(root, "ipAddress");
+        if (string.IsNullOrWhiteSpace(ip)) return null;
+
+        var tzId = "";
+        if (root.TryGetProperty("timeZones", out var tzs) && tzs.ValueKind == JsonValueKind.Array && tzs.GetArrayLength() > 0)
+            tzId = tzs[0].GetString() ?? "";
+
+        var offset = 0;
+        if (!string.IsNullOrWhiteSpace(tzId))
+        {
+            var zone = IpTimeZone.Find(tzId);
+            if (zone != null)
+                offset = (int)zone.GetUtcOffset(DateTime.UtcNow).TotalSeconds;
+        }
+
+        return new IpInfo(
+            Ip: ip,
+            CountryName: Str(root, "countryName"),
+            CountryCode: Str(root, "countryCode"),
+            Region: Str(root, "regionName"),
+            City: Str(root, "cityName"),
+            Isp: Str(root, "asnOrganization"),
             TimeZoneId: tzId,
             UtcOffsetSeconds: offset);
     }
