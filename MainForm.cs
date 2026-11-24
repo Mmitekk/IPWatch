@@ -647,10 +647,26 @@ internal sealed class MainForm : Form
                 return;
             }
 
-            _ping = await PingService.InternetAsync(cts.Token).ConfigureAwait(true);
-            _gatewayPing = _net.Gateway != null
-                ? await PingService.IcmpAsync(_net.Gateway, cts.Token).ConfigureAwait(true)
-                : null;
+            try
+            {
+                _ping = await PingService.InternetAsync(cts.Token).ConfigureAwait(true);
+            }
+            catch (Exception)
+            {
+                _ping = null;
+            }
+
+            if (_net.Gateway != null)
+            {
+                try
+                {
+                    _gatewayPing = await PingService.IcmpAsync(_net.Gateway, cts.Token).ConfigureAwait(true);
+                }
+                catch (Exception)
+                {
+                    _gatewayPing = null;
+                }
+            }
 
             _lastFastCheck = DateTime.UtcNow;
             _lastUpdateStamp = $"проверено {DateTime.Now:HH:mm:ss}";
@@ -693,16 +709,33 @@ internal sealed class MainForm : Form
             var pingTask = PingService.InternetAsync(ct);
 
             _net = await netTask.ConfigureAwait(true);
-            _ip = await ipTask.ConfigureAwait(true);
-            _ping = await pingTask.ConfigureAwait(true);
-
-            _gatewayPing = _net.Gateway != null
-                ? await PingService.IcmpAsync(_net.Gateway, ct).ConfigureAwait(true)
-                : null;
-
-            ApplyIp(_ip);
-            ApplyPing(_ping);
             ApplyNetwork();
+
+            _ip = await ipTask.ConfigureAwait(true);
+            ApplyIp(_ip);
+
+            try
+            {
+                _ping = await pingTask.ConfigureAwait(true);
+            }
+            catch (Exception)
+            {
+                _ping = null;
+            }
+            ApplyPing(_ping);
+
+            if (_net.Gateway != null)
+            {
+                try
+                {
+                    _gatewayPing = await PingService.IcmpAsync(_net.Gateway, ct).ConfigureAwait(true);
+                }
+                catch (Exception)
+                {
+                    _gatewayPing = null;
+                }
+                ApplyNetwork();
+            }
 
             var stamp = DateTime.Now.ToString("HH:mm:ss");
             _lastFastCheck = DateTime.UtcNow;

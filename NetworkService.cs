@@ -157,18 +157,17 @@ internal static class PingService
 
     public static async Task<int?> IcmpAsync(string host, CancellationToken ct)
     {
-        int? best = null;
-        for (int attempt = 0; attempt < 3; attempt++)
+        for (int attempt = 0; attempt < 2; attempt++)
         {
             try
             {
-                var reply = await Pinger.SendPingAsync(host, TimeSpan.FromMilliseconds(2500), cancellationToken: ct)
+                using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                attemptCts.CancelAfter(TimeSpan.FromMilliseconds(1500));
+
+                var reply = await Pinger.SendPingAsync(host, TimeSpan.FromMilliseconds(1500), cancellationToken: attemptCts.Token)
                     .ConfigureAwait(false);
                 if (reply.Status == IPStatus.Success)
-                {
-                    var ms = (int)reply.RoundtripTime;
-                    best = best is null ? ms : Math.Min(best.Value, ms);
-                }
+                    return (int)reply.RoundtripTime;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -176,26 +175,28 @@ internal static class PingService
             }
             catch (Exception)
             {
-                // ICMP может быть недоступен — пробуем ещё, затем TCP.
+                // пробуем следующую попытку
             }
         }
 
-        return best;
+        return null;
     }
 
     public static async Task<int?> TcpAsync(string host, int port, CancellationToken ct)
     {
-        int? best = null;
-        for (int attempt = 0; attempt < 3; attempt++)
+        for (int attempt = 0; attempt < 2; attempt++)
         {
             try
             {
                 using var client = new TcpClient();
+                using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                attemptCts.CancelAfter(TimeSpan.FromMilliseconds(2000));
+
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                await client.ConnectAsync(host, port, ct).ConfigureAwait(false);
+                await client.ConnectAsync(host, port, attemptCts.Token).ConfigureAwait(false);
                 sw.Stop();
                 var ms = (int)sw.ElapsedMilliseconds;
-                if (client.Connected) best = best is null ? ms : Math.Min(best.Value, ms);
+                if (client.Connected) return ms;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -203,18 +204,31 @@ internal static class PingService
             }
             catch (Exception)
             {
-                // нет связи по этому адресу/порту
+                // пробуем следующий хост
             }
         }
 
-        return best;
+        return null;
     }
 
-    /// <summary>Пинг до интернета: ICMP, при блокировке — TCP-рукопожатие до 1.1.1.1:443.</summary>
+    /// <summary>Пинг до интернета: сначала ICMP до доступных хостов, при блокировке — TCP handshake.</summary>
     public static async Task<int?> InternetAsync(CancellationToken ct)
     {
-        var icmp = await IcmpAsync("1.1.1.1", ct).ConfigureAwait(false);
-        if (icmp != null) return icmp;
-        return await TcpAsync("1.1.1.1", 443, ct).ConfigureAwait(false);
+        // В разных странах публичные DNS (например 1.1.1.1 в Индонезии) могут быть заблокированы провайдерами
+        foreach (var host in new[] { "77.88.55.88", "8.47.69.0" /* ipwho.is */, "8.8.8.8", "1.1.1.1" })
+        {
+            if (ct.IsCancellationRequested) break;
+            var icmp = await IcmpAsync(host, ct).ConfigureAwait(false);
+            if (icmp != null) return icmp;
+        }
+
+        foreach (var host in new[] { "yandex.ru", "google.com" })
+        {
+            if (ct.IsCancellationRequested) break;
+            var tcp = await TcpAsync(host, 443, ct).ConfigureAwait(false);
+            if (tcp != null) return tcp;
+        }
+
+        return null;
     }
 }
